@@ -100,7 +100,7 @@ wss.on('connection', (ws) => {
 
 // --- RESTful API 接口 ---
 
-// 1. 发送真实邮箱注册验证码（使用 Resend）
+// 1. 发送真实邮箱注册验证码（使用 Resend 已验证域名）
 app.post('/api/send-code', async (req, res) => {
     const { email } = req.body;
     if (!email || !email.includes('@')) {
@@ -112,7 +112,7 @@ app.post('/api/send-code', async (req, res) => {
 
     try {
         const data = await resend.emails.send({
-            from: 'Acme <onboarding@resend.dev>', // Resend 测试发件箱，无需绑定域名即可发信
+            from: 'Web3 IDEX <support@crypto-exchange.autos>', // 已在 Resend 成功验证的域名邮箱
             to: [email],
             subject: '【Web3 IDEX】注册账户安全验证码',
             html: `
