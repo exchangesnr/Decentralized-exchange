@@ -9,6 +9,7 @@
     "dotenv": "^16.4.5",
     "jsonwebtoken": "^9.0.2",
     "nodemailer": "^6.9.13",
+    "resend": "^3.2.0",
     "ws": "^8.16.0"
   }
 }

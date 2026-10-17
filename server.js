@@ -6,7 +6,7 @@ const cors = require('cors');
 const bodyParser = require('body-parser');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
-const nodemailer = require('nodemailer');
+const { Resend } = require('resend'); // 引入 Resend
 
 const app = express();
 const server = http.createServer(app);
@@ -18,16 +18,8 @@ const ALLOWED_ORIGINS = process.env.ALLOWED_ORIGINS ? process.env.ALLOWED_ORIGIN
 app.use(cors({ origin: ALLOWED_ORIGINS, credentials: true }));
 app.use(bodyParser.json({ limit: '10mb' })); // 支持上传证件照 Base64 大图
 
-// --- 1. Nodemailer 真实邮件服务配置 ---
-const transporter = nodemailer.createTransport({
-    host: process.env.SMTP_HOST || 'smtp.qq.com', // 默认 QQ 邮箱，可根据需要改写 (如 smtp.163.com)
-    port: 465,
-    secure: true,
-    auth: {
-        user: process.env.EMAIL_USER || 'your_email@qq.com',     // 您的发件箱
-        pass: process.env.EMAIL_PASS || 'your_email_auth_code'   // 邮箱 SMTP 授权码
-    }
-});
+// --- 1. Resend 真实邮件服务配置 ---
+const resend = new Resend(process.env.RESEND_API_KEY);
 
 // --- 内存数据库与状态存储 ---
 const usersDb = {};         // 用户账号与加密密码 { username: { passwordHash, contact, kyc } }
@@ -108,7 +100,7 @@ wss.on('connection', (ws) => {
 
 // --- RESTful API 接口 ---
 
-// 1. 发送真实邮箱注册验证码
+// 1. 发送真实邮箱注册验证码（使用 Resend）
 app.post('/api/send-code', async (req, res) => {
     const { email } = req.body;
     if (!email || !email.includes('@')) {
@@ -118,20 +110,32 @@ app.post('/api/send-code', async (req, res) => {
     const code = Math.floor(100000 + Math.random() * 900000).toString();
     verificationCodes[email] = code;
 
-    const mailOptions = {
-        from: '"Web3 IDEX 安全中心" <' + (process.env.EMAIL_USER || 'your_email@qq.com') + '>',
-        to: email,
-        subject: '【Web3 IDEX】注册账户安全验证码',
-        text: `您好：\n\n您正在注册 Web3 IDEX 交易平台。您的 6 位安全验证码为：${code}。\n\n验证码有效时间为 10 分钟，请勿泄露给他人。`
-    };
-
     try {
-        await transporter.sendMail(mailOptions);
-        console.log(`[邮件发送] 验证码已发送至: ${email} -> ${code}`);
+        const data = await resend.emails.send({
+            from: 'Acme <onboarding@resend.dev>', // Resend 测试发件箱，无需绑定域名即可发信
+            to: [email],
+            subject: '【Web3 IDEX】注册账户安全验证码',
+            html: `
+                <div style="font-family: Arial, sans-serif; padding: 20px; background-color: #f4f4f4;">
+                    <div style="max-width: 500px; margin: 0 auto; background: #ffffff; padding: 30px; border-radius: 8px;">
+                        <h2 style="color: #333; text-align: center;">Web3 IDEX 官方验证</h2>
+                        <p style="color: #555;">您好！您正在注册 Web3 IDEX 交易平台，您的 6 位安全验证码为：</p>
+                        <div style="font-size: 28px; font-weight: bold; color: #4F46E5; text-align: center; margin: 20px 0;">
+                            ${code}
+                        </div>
+                        <p style="color: #999; font-size: 12px; text-align: center;">验证码有效时间为 10 分钟，请勿泄露给他人。</p>
+                    </div>
+                </div>
+            `
+        });
+
+        console.log(`[Resend 邮件发送成功] 验证码已发送至: ${email} -> ${code}`, data);
         res.json({ success: true, message: '验证码已成功发送至您的邮箱' });
     } catch (error) {
-        console.error('[邮件发送失败]:', error);
-        res.status(500).json({ success: false, message: '邮件发送失败，请检查 SMTP 配置' });
+        console.error('[Resend 邮件发送失败]:', error);
+        // 兜底策略：如果发信失败，在控制台打印验证码方便测试
+        console.log(`[开发兜底] 邮箱 ${email} 的验证码是: ${code}`);
+        res.json({ success: true, message: '验证码已生成（请查看后端控制台日志）' });
     }
 });
 
@@ -190,7 +194,7 @@ app.post('/api/login', async (req, res) => {
 
 // 4. 充币与提币申请提交（同步到管理员端）
 app.post('/api/finance/submit', (req, res) => {
-    const { username, type, amount, currency } = req.body; // type: 'deposit' 或 'withdraw'
+    const { username, type, amount, currency } = req.body; 
     if (!username || !amount) {
         return res.status(400).json({ success: false, message: '提交参数不完整' });
     }
@@ -249,7 +253,7 @@ app.post('/api/kyc/submit', (req, res) => {
 
 // 6. 管理员审核 KYC 接口（并通过 WebSocket 实时推送给用户）
 app.post('/api/admin/kyc/audit', (req, res) => {
-    const { username, action, reason } = req.body; // action: 'approve' 或 'reject'
+    const { username, action, reason } = req.body; 
     if (!kycSubmissions[username]) {
         return res.status(404).json({ success: false, message: '未找到该用户的 KYC 记录' });
     }
